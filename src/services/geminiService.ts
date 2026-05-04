@@ -22,14 +22,20 @@ export function clearCachedAI() {
 
 // --- Model Fallback Chain ---
 const TEXT_MODEL_CHAIN = [
-  "gemini-3-flash-preview",
-  "gemini-3-pro-preview",
   "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-1.5-flash",
 ];
 
-const IMAGE_MODEL = "gemini-2.5-flash-image";
+const IMAGE_MODEL_CHAIN = [
+  "imagen-3.0-generate-002",
+  "imagen-3.0-generate-001",
+];
 
-const TTS_MODEL = "gemini-3.1-flash-tts-preview";
+const TTS_MODEL_CHAIN = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash-exp",
+];
 
 async function withRetry<T>(
   fn: (model: string) => Promise<T>,
@@ -44,8 +50,14 @@ async function withRetry<T>(
       } catch (err: any) {
         lastError = err;
         const status = err?.status || err?.httpStatusCode || 0;
-        const msg = err?.message || "";
+        const msg = err?.message || String(err);
         
+        // If model not found, invalid argument, or forbidden, try next model immediately
+        if (status === 400 || status === 403 || status === 404 || msg.includes("not found") || msg.includes("does not support")) {
+          console.warn(`Model ${model} failed (${status}): ${msg}. Trying next model...`);
+          break; // try next model
+        }
+
         // If rate limited or server error, try next model/retry
         if (status === 429 || status >= 500 || msg.includes("RESOURCE_EXHAUSTED") || msg.includes("overloaded")) {
           console.warn(`Model ${model} attempt ${attempt + 1} failed (${status}): ${msg}`);
@@ -55,7 +67,7 @@ async function withRetry<T>(
           }
           break; // try next model
         }
-        // For other errors (auth, bad request), throw immediately
+        // For other errors, throw immediately
         throw err;
       }
     }
@@ -179,25 +191,26 @@ export const generateImage = async (
 ): Promise<string> => {
   const ai = getAI(apiKey);
 
-  const response = await ai.models.generateContent({
-    model: IMAGE_MODEL,
-    contents: {
-      parts: [{ text: prompt }],
-    },
-    config: {
-      imageConfig: {
-        aspectRatio,
+  return withRetry(async (model) => {
+    const response = await ai.models.generateContent({
+      model,
+      contents: {
+        parts: [{ text: prompt }],
       },
-    },
-  });
+      config: {
+        imageConfig: {
+          aspectRatio,
+        },
+      },
+    });
 
-  for (const part of response.candidates?.[0]?.content?.parts || []) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
+    for (const part of response.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData) {
+        return `data:image/png;base64,${part.inlineData.data}`;
+      }
     }
-  }
-
-  throw new Error("No image data returned from Gemini");
+    throw new Error("No image data returned from Gemini");
+  }, IMAGE_MODEL_CHAIN);
 };
 
 // --- PCM to WAV ---
@@ -274,41 +287,28 @@ Output ONLY the audio data. Do NOT provide any text response, translations, or e
   // 'Puck' is a youthful/child-like voice. 'Zephyr' and 'Kore' are alternatives.
   const voices = ['Puck', 'Kore', 'Zephyr', 'Fenrir']; 
   
-  for (let i = 0; i < 3; i++) {
-    try {
-      const currentVoice = voices[i % voices.length];
-      const response = await ai.models.generateContent({
-        model: TTS_MODEL,
-        contents: [{ parts: [{ text: cleanedText }] }],
-        config: {
-          systemInstruction,
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: currentVoice as any },
-            },
+  return withRetry(async (model) => {
+    const currentVoice = voices[Math.floor(Math.random() * voices.length)];
+    const response = await ai.models.generateContent({
+      model,
+      contents: [{ parts: [{ text: cleanedText }] }],
+      config: {
+        systemInstruction,
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: currentVoice as any },
           },
         },
-      });
+      },
+    });
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        return pcmToWav(base64Audio);
-      }
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`Audio generation attempt ${i + 1} failed with voice ${voices[i % voices.length]}:`, err);
-      
-      if (i < 2) {
-        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
-      }
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (base64Audio) {
+      return pcmToWav(base64Audio);
     }
-  }
-
-  if (lastError) {
-    console.error("Gemini TTS Final Failure:", lastError);
-  }
-  throw lastError || new Error("No audio data returned from Gemini");
+    throw new Error("No audio data returned from Gemini");
+  }, TTS_MODEL_CHAIN);
 };
 
 // --- Speech Evaluation ---
