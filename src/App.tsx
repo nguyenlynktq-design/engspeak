@@ -138,13 +138,22 @@ function AppContent() {
       setGenerationStep('image');
 
       setIsAudioLoading(true);
-      const [imageUrl, audio] = await Promise.all([
-        generateImage(prompt, aspectRatio, apiKey),
-        rt ? generateAudio(rt, level, apiKey).catch(err => {
-          console.error("Audio generation failed", err);
-          return null;
-        }) : Promise.resolve(null)
-      ]);
+      let imageUrl = null;
+      try {
+        imageUrl = await generateImage(prompt, aspectRatio, apiKey);
+      } catch (err: any) {
+        console.error("Image generation failed:", err.message);
+        // We do not fail the whole process if only image fails
+      }
+
+      let audio = null;
+      if (rt) {
+        try {
+          audio = await generateAudio(rt, level, apiKey);
+        } catch (err: any) {
+          console.error("Audio generation failed:", err.message);
+        }
+      }
 
       setGeneratedImage(imageUrl);
       if (audio) setAudioUrl(audio);
@@ -152,14 +161,12 @@ function AppContent() {
       setGenerationStep('done');
     } catch (err: any) {
       console.error(err);
-      const msg = err?.message || "";
+      const msg = err?.message || String(err);
       if (msg === "API_KEY_MISSING") {
         setError("Vui lòng nhập API Key trước khi sử dụng.");
         setShowApiModal(true);
-      } else if (msg.includes("RESOURCE_EXHAUSTED") || msg.includes("429")) {
-        setError("API Key hết quota. Vui lòng đổi key hoặc chờ 1 phút rồi thử lại.");
       } else {
-        setError("Có lỗi xảy ra khi tạo nội dung. Vui lòng thử lại.");
+        setError(`Lỗi API: ${msg} (Bạn có thể thử F5 hoặc kiểm tra lại kết nối/API Key)`);
       }
       setIsAudioLoading(false);
       setGenerationStep('idle');
